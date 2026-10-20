@@ -1,0 +1,16 @@
+{
+  "official_url": "https://www.chadstone.com.au/christmas/santa-photos",
+  "start_date": "2026-11-04",
+  "end_date": "2026-12-15",
+  "timezone": "Australia/Melbourne",
+  "enabled": false,
+  "full_date_range_verified": false,
+  "standard_entry_selector": "",
+  "standard_entry_index": 0,
+  "calendar_frame_url_contains": "",
+  "standard_scope_selector": "",
+  "slot_selector": "",
+  "slot_datetime_attribute": "data-datetime",
+  "empty_state_selector": "",
+  "booking_link": "https://www.chadstone.com.au/christmas/santa-photos"
+}
