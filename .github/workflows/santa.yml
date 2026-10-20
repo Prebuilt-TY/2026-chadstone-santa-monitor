@@ -1,0 +1,73 @@
+name: Chadstone Santa availability
+on:
+  schedule:
+    - cron: '2-59/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Choose probe first; test-push needs NTFY_TOPIC'
+        required: true
+        default: probe
+        type: choice
+        options:
+          - probe
+          - monitor
+          - test-push
+permissions:
+  contents: write
+concurrency:
+  group: chadstone-santa-availability
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Skip disabled or expired scheduled scan
+        id: gate
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json,os
+          from datetime import datetime,date
+          from zoneinfo import ZoneInfo
+          c=json.load(open("config.json"))
+          today=datetime.now(ZoneInfo("Australia/Melbourne")).date()
+          active=os.getenv("GITHUB_EVENT_NAME")=="workflow_dispatch" or (c["enabled"] and today<=date.fromisoformat(c["end_date"]))
+          print("active="+str(active).lower())
+          PY
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.active == 'true'
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install Python dependencies
+        if: steps.gate.outputs.active == 'true'
+        run: pip install -r requirements.txt
+      - name: Install Chromium
+        if: steps.gate.outputs.active == 'true'
+        run: python -m playwright install --with-deps chromium
+      - name: Run probe or monitor
+        if: steps.gate.outputs.active == 'true'
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          RUN_MODE: ${{ inputs.mode }}
+        run: python monitor.py --mode "${RUN_MODE:-monitor}"
+      - name: Save last-seen snapshot
+        if: success() && steps.gate.outputs.active == 'true' && github.event_name == 'schedule'
+        run: |
+          if ! git diff --quiet -- state.json; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add state.json
+            git commit -m 'Update slot snapshot [skip ci]'
+            git push
+          fi
+      - name: Upload diagnostics
+        if: failure() || inputs.mode == 'probe'
+        uses: actions/upload-artifact@v4
+        with:
+          name: chadstone-diagnostic-${{ github.run_id }}
+          path: diagnostics/
+          retention-days: 1
+          if-no-files-found: ignore
