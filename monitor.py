@@ -148,7 +148,7 @@ async def inspect(cfg, probe):
             if index >= len(visible):
                 raise RuntimeError("No visible booking entry found; check landing-page diagnostic.")
             await visible[index].click(timeout=12000)
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(20000 if probe else 5000)
             if probe:
                 await diagnostic(context, "After booking entry click. NOT an availability check.")
                 print("Probe complete; NO booking notifications were sent.")
