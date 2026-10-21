@@ -213,27 +213,63 @@ async def probe_both_months(page, cfg):
     await page.wait_for_timeout(1400)
     december = await snapshot("December 2026")
 
-    # Selecting an available date only explores the UI; no booking/payment.
-    if december:
-        day=december[0]["day"]
-        selector=f"#booking-modal_wrapper div.f1wa5vh2"
-        cells=page.locator(selector).filter(has_text=re.compile(r"^%d$" % day))
-        if await cells.count()==1:
-            await cells.click(timeout=6000)
-            await page.wait_for_timeout(1200)
+    # Inspect one candidate day in EACH month if any are apparently selectable.
+    # Only diagnostic UI interactions; never go past date/time exploration.
+    report["time_probe"] = []
+
+    async def inspect_candidate(month, day):
+        label = f"2026-{month:02d}-{day:02d}"
+        try:
+            selector = "#booking-modal_wrapper div.f1wa5vh2"
+            cells = page.locator(selector).filter(has_text=re.compile(r"^%d$" % day))
+            if await cells.count() != 1:
+                report["time_probe"].append({"date": label, "error": "Ambiguous date selector"})
+                return
+            await cells.click(timeout=7000)
+            await page.wait_for_timeout(1600)
             try:
-                await page.screenshot(path=str(DIAG / "after-date-selection.png"), full_page=False)
+                await page.screenshot(
+                    path=str(DIAG / f"after-date-selection-{month:02d}.png"),
+                    full_page=False)
             except Exception:
                 pass
-            report["time_probe"]={
-                "selected_date":f"2026-12-{day:02d}",
-                "visible_text":(await page.locator("#booking-modal_wrapper").inner_text(timeout=4000))[:3000],
-                "buttons":await page.locator("#booking-modal_wrapper button").evaluate_all(
+            report["time_probe"].append({
+                "selected_date": label,
+                "visible_text": (await page.locator("#booking-modal_wrapper").inner_text(timeout=5000))[:2500],
+                "buttons": await page.locator("#booking-modal_wrapper button").evaluate_all(
                     "els => els.slice(0,70).map(e=>({text:(e.innerText||'').slice(0,80),disabled:e.disabled}))")
-            }
-            print("Date selected for UI diagnostics only: 2026-12-%02d" % day)
-    elif november:
-        report["time_probe"]={"note":"November candidate exists but probe does not switch back to inspect it."}
+            })
+            print("Inspected selected date (no booking): " + label)
+        except Exception as exc:
+            report["time_probe"].append({"date": label, "error": str(exc)[:250]})
+            print("Date diagnostic could not complete for " + label)
+
+    # Calendar currently shows December.
+    if december:
+        await inspect_candidate(12, december[0]["day"])
+
+    # Reopen a fresh booking calendar so November is independently checked
+    # even if selecting December advanced the booking interface.
+    if november:
+        try:
+            await page.goto(cfg["official_url"], wait_until="domcontentloaded", timeout=40000)
+            await page.wait_for_timeout(2500)
+            entry_selector = cfg.get("standard_entry_selector") or "a:has-text('Book Now'), button:has-text('Book Now')"
+            controls = page.locator(entry_selector)
+            visible = []
+            for i in range(min(await controls.count(), 20)):
+                if await controls.nth(i).is_visible():
+                    visible.append(controls.nth(i))
+            index = int(cfg.get("standard_entry_index", 0))
+            if index >= len(visible):
+                raise RuntimeError("Booking entry missing when reopening November")
+            await visible[index].click(timeout=12000)
+            await page.locator("#booking-modal_wrapper h4", has_text="November 2026").wait_for(timeout=25000)
+            await page.wait_for_timeout(1000)
+            await inspect_candidate(11, november[0]["day"])
+        except Exception as exc:
+            report["time_probe"].append({"month": "November 2026", "error": str(exc)[:250]})
+            print("November time exploration failed; day state was still recorded.")
     (DIAG / "month-status.json").write_text(json.dumps(report,indent=2,ensure_ascii=False))
     print("Both-month calendar diagnostic saved. No booking was made.")
 
