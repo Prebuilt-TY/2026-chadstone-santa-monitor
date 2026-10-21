@@ -456,9 +456,11 @@ async def inspect(cfg, probe):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("probe", "monitor", "test-push"), default="probe")
+    parser.add_argument("--mode", choices=("probe", "monitor", "dry-run", "test-push"), default="probe")
     mode = parser.parse_args().mode
     cfg = json.loads((ROOT / "config.json").read_text())
+    if mode == "dry-run":
+        cfg["enabled"] = True  # Read-only end-to-end test; no notification or state changes
     if mode == "test-push":
         send_push(cfg, ["TEST ONLY — NOT A REAL APPOINTMENT"],
                   "TEST ONLY: Chadstone Santa monitor")
@@ -474,6 +476,8 @@ def main():
     slots = asyncio.run(inspect(cfg, probe=mode == "probe"))
     if mode == "monitor":
         compare_notify(slots, cfg)
+    elif mode == "dry-run":
+        print("DRY RUN COMPLETE: %d exact candidate time slots; no notification sent" % len(slots))
 
 
 if __name__ == "__main__":
