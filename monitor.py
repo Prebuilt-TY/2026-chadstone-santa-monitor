@@ -274,6 +274,143 @@ async def probe_both_months(page, cfg):
     print("Both-month calendar diagnostic saved. No booking was made.")
 
 
+
+async def scan_confirmed_slots(page, cfg):
+    """Fail-closed scan: all target dates in both months, then exact clickable times."""
+    import calendar
+    from datetime import datetime as dt
+    DIAG.mkdir(exist_ok=True)
+    root = page.locator("#booking-modal_wrapper")
+    if await root.count() != 1 or not await root.is_visible():
+        raise RuntimeError("Standard booking modal not open")
+    title = await root.inner_text(timeout=5000)
+    if "Santa Photography 2026" not in title or "Sensitive Santa" in title:
+        raise RuntimeError("Cannot verify Standard Santa event identity")
+    report = {"mode": "full-date-scan", "months": [], "time_probes": []}
+    month_candidates = {}
+
+    async def snapshot(month, label):
+        data = await page.evaluate(r'''() => {
+          const root = document.querySelector('#booking-modal_wrapper');
+          const head = [...root.querySelectorAll('h4')].find(el => /^(November|December) 2026$/.test(el.textContent.trim()));
+          if (!head) return {error:'month heading absent'};
+          const grid = head.parentElement.parentElement.parentElement;
+          const dayCells = [...grid.querySelectorAll('div')].filter(el =>
+             el.childElementCount === 0 && el.classList.contains('f1wa5vh2') &&
+             /^\d{1,2}$/.test(el.textContent.trim()));
+          return {heading:head.textContent.trim(), days:dayCells.map(el => {
+             const style = getComputedStyle(el);
+             const rect = el.getBoundingClientRect();
+             return {day:Number(el.textContent.trim()),
+                pointerEvents:style.pointerEvents,
+                cursor:style.cursor,
+                crossedOut:style.backgroundImage.includes('linear-gradient'),
+                visible:rect.width>0 && rect.height>0 };
+          })};
+        }''')
+        days = data.get("days", [])
+        expected = calendar.monthrange(2026, month)[1]
+        if data.get("heading") != label or len(days) != expected or set(x["day"] for x in days) != set(range(1,expected+1)):
+            raise RuntimeError("Calendar date coverage incomplete for "+ label)
+        active = []
+        for item in days:
+            day = item["day"]
+            localdate = f"2026-{month:02d}-{day:02d}"
+            if cfg["start_date"] <= localdate <= cfg["end_date"] and \
+                item["pointerEvents"] == "auto" and item["cursor"] == "pointer" and \
+                not item["crossedOut"] and item["visible"]:
+                active.append(day)
+        report["months"].append({"month":label, "target_candidates":active,
+                                  "inspected_dates":len([d for d in days if cfg["start_date"] <= f"2026-{month:02d}-{d['day']:02d}" <= cfg["end_date"]])})
+        month_candidates[month] = active
+        print(label + ": %d potential available dates" % len(active))
+
+    try:
+        await snapshot(11, "November 2026")
+        h = root.locator("h4", has_text="November 2026")
+        if await h.count() != 1:
+            raise RuntimeError("November heading not unique")
+        arrow = h.locator("xpath=../..").locator("xpath=./div[last()]")
+        if await arrow.count()!=1:
+            raise RuntimeError("December navigation missing")
+        await arrow.click(timeout=7000)
+        await root.locator("h4", has_text="December 2026").wait_for(timeout=12000)
+        await page.wait_for_timeout(1200)
+        await snapshot(12, "December 2026")
+        if sum(len(v) for v in month_candidates.values()) > 42:
+            raise RuntimeError("Implausibly many clickable dates: calibration required")
+        if not any(month_candidates.values()):
+            print("Complete target date scan: no selectable day, no notification")
+            return []
+
+        confirmed = []
+        for month in (11,12):
+            for day in month_candidates[month]:
+                # Reset for each date; avoids selecting a time or booking accidentally.
+                await page.goto(cfg["official_url"],wait_until="domcontentloaded",timeout=40000)
+                await page.wait_for_timeout(2000)
+                selector = cfg.get("standard_entry_selector") or "a:has-text('Book Now'), button:has-text('Book Now')"
+                entries = page.locator(selector)
+                shown=[]
+                for i in range(min(await entries.count(),20)):
+                    if await entries.nth(i).is_visible(): shown.append(entries.nth(i))
+                idx=int(cfg.get("standard_entry_index",0))
+                if idx>=len(shown): raise RuntimeError("Standard booking entry missing")
+                await shown[idx].click(timeout=10000)
+                modal=page.locator("#booking-modal_wrapper")
+                await modal.locator("h4",has_text="November 2026").wait_for(timeout=25000)
+                if "Santa Photography 2026" not in (await modal.inner_text(timeout=5000)):
+                    raise RuntimeError("Unexpected event after reopening modal")
+                if month==12:
+                    h=modal.locator("h4",has_text="November 2026")
+                    await h.locator("xpath=../..").locator("xpath=./div[last()]").click(timeout=7000)
+                    await modal.locator("h4",has_text="December 2026").wait_for(timeout=12000)
+                await page.wait_for_timeout(1000)
+                cells=modal.locator("div.f1wa5vh2").filter(has_text=re.compile(r"^%d$"%day))
+                if await cells.count()!=1: raise RuntimeError("Ambiguous candidate date control")
+                status=await cells.first.evaluate("""el=>{
+                    const s=getComputedStyle(el);
+                    return {pointer:s.pointerEvents, cursor:s.cursor, strike:s.backgroundImage.includes('linear-gradient')};
+                }""")
+                if status["pointer"]!="auto" or status["cursor"]!="pointer" or status["strike"]:
+                    raise RuntimeError("Candidate date changed during scan; rescan next time")
+                await cells.click(timeout=6000)
+                await page.wait_for_timeout(1500)
+                time_controls=await page.evaluate(r'''() => {
+                    const root=document.querySelector('#booking-modal_wrapper');
+                    if(!root)return [];
+                    const match=/^(?:[01]?\d|2[0-3]):[0-5]\d\s*(?:a\.?m\.?|p\.?m\.?)?$/i;
+                    return [...root.querySelectorAll('*')].filter(el => el.children.length===0 && match.test((el.innerText||el.textContent||'').trim()))
+                      .slice(0,100).map(el => {
+                        const element=el.closest('button,[role="button"]')||el.parentElement;
+                        const style=element?getComputedStyle(element):null;
+                        const rect=element?.getBoundingClientRect();
+                        return {text:(el.innerText||el.textContent||'').trim(),
+                          visible:!!rect&&rect.width>0&&rect.height>0,
+                          clickable:!!style&&style.pointerEvents==='auto' &&
+                            (style.cursor==='pointer' || element?.tagName==='BUTTON' || element?.getAttribute('role')==='button') &&
+                            !element?.disabled && element?.getAttribute('aria-disabled')!=='true'};
+                      });
+                }''')
+                date_string=f"2026-{month:02d}-{day:02d}"
+                valid=[x["text"] for x in time_controls if x["visible"] and x["clickable"]]
+                report["time_probes"].append({"date":date_string,"time_strings":valid[:60]})
+                if not valid:
+                    raise RuntimeError("Date became selectable but no confirmed clickable time: "+date_string)
+                for value in valid:
+                    raw=value.upper().replace(".","").replace(" ","")
+                    m=re.fullmatch(r"(\d{1,2}):(\d{2})(AM|PM)?",raw)
+                    if not m: continue
+                    hours, minutes=int(m.group(1)), int(m.group(2))
+                    if m.group(3):
+                        if not 1 <= hours <= 12: continue
+                        hours=hours % 12 + (12 if m.group(3)=="PM" else 0)
+                    elif hours>23:continue
+                    confirmed.append(f"{date_string}T{hours:02d}:{minutes:02d}")
+        return filter_slots(confirmed,cfg)
+    finally:
+        (DIAG/"active-scan.json").write_text(json.dumps(report,indent=2,ensure_ascii=False))
+
 async def inspect(cfg, probe):
     from playwright.async_api import async_playwright
     DIAG.mkdir(exist_ok=True)
@@ -307,50 +444,9 @@ async def inspect(cfg, probe):
                 await probe_both_months(page, cfg)
                 print("Probe complete; NO booking notifications were sent.")
                 return []
-            mandatory = ("standard_scope_selector", "slot_selector", "empty_state_selector",
-                         "slot_datetime_attribute", "calendar_frame_url_contains")
-            if not cfg.get("enabled") or not cfg.get("full_date_range_verified") or any(not cfg.get(k) for k in mandatory):
-                raise RuntimeError("Calendar not calibrated; real monitoring remains disabled")
-            matches = []
-            for pg in context.pages:
-                for frame in pg.frames:
-                    if cfg["calendar_frame_url_contains"].lower() not in frame.url.lower():
-                        continue
-                    scope = frame.locator(cfg["standard_scope_selector"])
-                    if await scope.count() == 1:
-                        matches.append(scope)
-            if len(matches) != 1:
-                raise RuntimeError("Expected exactly one Standard Santa calendar; got " + str(len(matches)))
-            scope = matches[0]
-            controls = scope.locator(cfg["slot_selector"])
-            if await controls.count() > 1000:
-                raise RuntimeError("Too many candidate slots")
-            raw = []
-            for i in range(await controls.count()):
-                node = controls.nth(i)
-                if not await node.is_visible() or not await node.is_enabled():
-                    continue
-                if (await node.get_attribute("aria-disabled") or "").lower() == "true":
-                    continue
-                tag = await node.evaluate("el => el.tagName.toLowerCase()")
-                role = (await node.get_attribute("role") or "").lower()
-                if tag != "button" and role != "button":
-                    continue
-                label = ((await node.inner_text(timeout=1500)) + " " +
-                         (await node.get_attribute("aria-label") or "")).lower()
-                if re.search(r"sold out|fully booked|unavailable|sensitive|disabled", label):
-                    continue
-                raw_date = await node.get_attribute(cfg["slot_datetime_attribute"])
-                if raw_date:
-                    raw.append(raw_date)
-            if not raw:
-                # An empty view is NOT evidence of no availability; require explicit marker.
-                marker = scope.locator(cfg["empty_state_selector"])
-                if await marker.count() == 0 or not await marker.first.is_visible():
-                    raise RuntimeError("No slots AND no explicit verified sold-out indicator")
-            result = filter_slots(raw, cfg)
-            await diagnostic(context, "Calibrated scan found %d matching slots" % len(result))
-            return result
+            if not cfg.get("enabled"):
+                raise RuntimeError("Monitor must be explicitly enabled")
+            return await scan_confirmed_slots(page, cfg)
         except Exception as exc:
             await diagnostic(context, "PROBE/SCAN ERROR: " + str(exc)[:200])
             raise
