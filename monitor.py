@@ -122,6 +122,47 @@ async def diagnostic(context, label):
     }, ensure_ascii=False)[:10000])
 
 
+
+async def calendar_probe(page):
+    """Collect booking calendar day-cell structure without selecting/booking anything."""
+    payload = await page.evaluate(r'''() => {
+      const text = el => (el?.innerText || el?.textContent || '').trim();
+      const info = el => {
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        const attrs = {};
+        for (const name of ['class','role','aria-label','aria-disabled','data-date','data-time','data-datetime','title','tabindex','disabled']) {
+          const v = el.getAttribute(name);
+          if (v !== null) attrs[name] = v.slice(0,180);
+        }
+        return {tag:el.tagName.toLowerCase(),text:text(el).slice(0,60),
+          attrs, rect:{x:Math.round(r.x),y:Math.round(r.y),w:Math.round(r.width),h:Math.round(r.height)},
+          style:{pointerEvents:s.pointerEvents,cursor:s.cursor,background:s.backgroundImage.slice(0,150),opacity:s.opacity},
+          html:el.outerHTML.slice(0,550)};
+      };
+      const headings = [...document.querySelectorAll('h1,h2,h3,h4,h5,div,span,p')]
+        .filter(el => [...el.childNodes].some(n=>n.nodeType === 3 && /Select date\s*&\s*time/i.test(n.textContent||'')))
+        .slice(0,8).map(info);
+      const digits = [...document.querySelectorAll('body *')]
+        .filter(el => el.children.length === 0 && /^\d{1,2}$/.test(text(el)) && el.getBoundingClientRect().width > 0)
+        .slice(0,160).map(el => ({day:info(el),parent:info(el.parentElement),grandparent:info(el.parentElement?.parentElement)}));
+      const navigation = [...document.querySelectorAll('body *')]
+        .filter(el => el.children.length === 0 && /^(November 2026|December 2026|NEXT)$/i.test(text(el)))
+        .slice(0,16).map(el=>({item:info(el),parent:info(el.parentElement),grandparent:info(el.parentElement?.parentElement)}));
+      const calendar = [...document.querySelectorAll('[role=grid], [role=gridcell], [class*=calendar i], [class*=datepicker i], [class*=date-picker i]')]
+        .slice(0,55).map(info);
+      const titled = [...document.querySelectorAll('[aria-label], [data-date], [title]')]
+        .filter(el=>{const r=el.getBoundingClientRect();return r.width>0&&r.height>0;})
+        .slice(0,100).map(info);
+      return {calendarHeadings:headings, digitCells:digits, navigation, calendarCandidates:calendar, labelledCandidates:titled};
+    }''')
+    path = DIAG / "calendar-diagnostics.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    print("Calendar diagnostic: %d digit cells, %d candidate controls." %
+          (len(payload["digitCells"]), len(payload["calendarCandidates"])))
+
+
 async def inspect(cfg, probe):
     from playwright.async_api import async_playwright
     DIAG.mkdir(exist_ok=True)
@@ -151,6 +192,7 @@ async def inspect(cfg, probe):
             await page.wait_for_timeout(20000 if probe else 5000)
             if probe:
                 await diagnostic(context, "After booking entry click. NOT an availability check.")
+                await calendar_probe(page)
                 print("Probe complete; NO booking notifications were sent.")
                 return []
             mandatory = ("standard_scope_selector", "slot_selector", "empty_state_selector",
