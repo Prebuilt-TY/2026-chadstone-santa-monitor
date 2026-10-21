@@ -11,6 +11,7 @@ Settings: Standard Santa Photography only; **4 November–15 December 2026** inc
 2. Choose **Run workflow**, set mode to **probe**, press Run workflow.
 3. Open the run. Download **chadstone-diagnostic** artifact within one day; it contains `probe.json` and screenshots.
 4. Probe visits the official page and clicks the first visible Book Now control. This has **not** been verified as the Standard appointment calendar. Do not assume probe output showing a button means real availability. Check diagnostic files for personal details before sharing.
+5. The expanded probe also captures `calendar-november.png`, `calendar-december.png` and `month-status.json`. It examines marked/disabled day cells in both months and may select a date only to inspect visible time choices, but never submits booking/payment. Day selection alone does NOT prove an actual time slot is available.
 
 ## Step 2: Calibrate booking calendar (mandatory)
 The program starts with `enabled: false`, `full_date_range_verified: false` and blank CSS selectors. It will **not** send real availability alerts until the actual Standard-only booking interface is validated, accurate full ISO date/time values are extracted, and all dates 4 Nov–15 Dec are traversed. The current starter does not navigate calendar months/weeks automatically. A booking-provider-specific navigation adapter may be necessary. CAPTCHA/login/bot barriers must not be bypassed.
