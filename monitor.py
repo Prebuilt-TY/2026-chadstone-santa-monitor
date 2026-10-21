@@ -163,6 +163,81 @@ async def calendar_probe(page):
           (len(payload["digitCells"]), len(payload["calendarCandidates"])))
 
 
+
+async def probe_both_months(page, cfg):
+    """Inspect Nov and Dec date cells using page style; optionally inspect day selection."""
+    DIAG.mkdir(exist_ok=True)
+    report = {"kind": "diagnostic_only", "months": [], "time_probe": None}
+    async def snapshot(month_name):
+        result = await page.evaluate(r'''() => {
+          const root=document.querySelector('#booking-modal_wrapper');
+          if (!root) return {error:"booking modal missing"};
+          const heading=[...root.querySelectorAll('h4')].find(x=>/^(November|December) 2026$/.test(x.textContent.trim()));
+          if (!heading) return {error:"month heading missing"};
+          const grid=heading.parentElement.parentElement.parentElement;
+          const days=[...grid.querySelectorAll('div')].filter(el=> el.childElementCount===0 && el.classList.contains('f1wa5vh2') && /^\d{1,2}$/.test(el.textContent.trim()));
+          return {
+             heading:heading.textContent.trim(),
+             days:days.map(el=> {
+               const cs=getComputedStyle(el);
+               return {day:Number(el.textContent.trim()),className:el.className,
+                 pointerEvents:cs.pointerEvents,cursor:cs.cursor,
+                 diagonalMark:cs.backgroundImage.includes('linear-gradient'),
+                 rect:{x:Math.round(el.getBoundingClientRect().x),y:Math.round(el.getBoundingClientRect().y)}
+               };
+             })
+          };
+        }''')
+        if result.get("heading") != month_name or len(result.get("days", [])) < 28:
+            raise RuntimeError("Calendar month not reliably loaded: " + json.dumps(result)[:220])
+        report["months"].append(result)
+        try:
+            await page.screenshot(path=str(DIAG / ("calendar-" + month_name.split()[0].lower() + ".png")), full_page=False)
+        except Exception as exc:
+            print("Screenshot failed: " + str(exc)[:150])
+        candidates=[d for d in result["days"] if
+           cfg["start_date"] <= ("%04d-%02d-%02d" % (2026, 11 if month_name.startswith("November") else 12, d["day"])) <= cfg["end_date"]
+           and d["pointerEvents"] != "none" and not d["diagonalMark"]]
+        print("%s: %s target dates not crossed out and pointer-active" % (month_name, len(candidates)))
+        return candidates
+
+    november = await snapshot("November 2026")
+    header=page.locator("#booking-modal_wrapper h4", has_text="November 2026")
+    if await header.count()!=1:
+        raise RuntimeError("Month heading not unique")
+    right_arrow=header.locator("xpath=../..").locator("xpath=./div[last()]")
+    if await right_arrow.count()!=1:
+        raise RuntimeError("Next month arrow missing")
+    await right_arrow.click(timeout=7000)
+    await page.locator("#booking-modal_wrapper h4", has_text="December 2026").wait_for(timeout=12000)
+    await page.wait_for_timeout(1400)
+    december = await snapshot("December 2026")
+
+    # Selecting an available date only explores the UI; no booking/payment.
+    if december:
+        day=december[0]["day"]
+        selector=f"#booking-modal_wrapper div.f1wa5vh2"
+        cells=page.locator(selector).filter(has_text=re.compile(r"^%d$" % day))
+        if await cells.count()==1:
+            await cells.click(timeout=6000)
+            await page.wait_for_timeout(1200)
+            try:
+                await page.screenshot(path=str(DIAG / "after-date-selection.png"), full_page=False)
+            except Exception:
+                pass
+            report["time_probe"]={
+                "selected_date":f"2026-12-{day:02d}",
+                "visible_text":(await page.locator("#booking-modal_wrapper").inner_text(timeout=4000))[:3000],
+                "buttons":await page.locator("#booking-modal_wrapper button").evaluate_all(
+                    "els => els.slice(0,70).map(e=>({text:(e.innerText||'').slice(0,80),disabled:e.disabled}))")
+            }
+            print("Date selected for UI diagnostics only: 2026-12-%02d" % day)
+    elif november:
+        report["time_probe"]={"note":"November candidate exists but probe does not switch back to inspect it."}
+    (DIAG / "month-status.json").write_text(json.dumps(report,indent=2,ensure_ascii=False))
+    print("Both-month calendar diagnostic saved. No booking was made.")
+
+
 async def inspect(cfg, probe):
     from playwright.async_api import async_playwright
     DIAG.mkdir(exist_ok=True)
@@ -193,6 +268,7 @@ async def inspect(cfg, probe):
             if probe:
                 await diagnostic(context, "After booking entry click. NOT an availability check.")
                 await calendar_probe(page)
+                await probe_both_months(page, cfg)
                 print("Probe complete; NO booking notifications were sent.")
                 return []
             mandatory = ("standard_scope_selector", "slot_selector", "empty_state_selector",
