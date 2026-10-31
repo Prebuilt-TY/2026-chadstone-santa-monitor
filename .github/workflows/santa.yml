@@ -1,7 +1,5 @@
 name: Chadstone Santa availability
 on:
-  schedule:
-    - cron: '2-59/5 * * * *'
   workflow_dispatch:
     inputs:
       mode:
